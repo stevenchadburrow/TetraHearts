@@ -1,5 +1,5 @@
 # TetraHearts
-Tetris x Dating-Sim for the Gameboy
+Tetra x Dating-Sim for the Gameboy
 
 Uses Gameboy Assembly through <a href="https://rgbds.gbdev.io/">RGBDS</a>.  This is a 32KB No-MBC cart-type for the DMG.
 
