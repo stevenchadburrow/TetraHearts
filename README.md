@@ -1,7 +1,7 @@
 # TetraHearts
 Tetris x Dating-Sim for the Gameboy
 
-Uses Gameboy Assembly through <a href="https://rgbds.gbdev.io/">RGBDS</a>.  This is a 32KB NROM cart-type for the DMG.
+Uses Gameboy Assembly through <a href="https://rgbds.gbdev.io/">RGBDS</a>.  This is a 32KB No-MBC cart-type for the DMG.
 
 At the beginning of every date, you pick a partner:
 - Michael, a care-free boy who loves to have fun
