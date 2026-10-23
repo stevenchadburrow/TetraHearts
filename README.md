@@ -30,4 +30,6 @@ Audio Controls:
 <img src="TetraHearts-Screenshot1.png"><br>
 <img src="TetraHearts-Screenshot2.png"><br>
 <img src="TetraHearts-Screenshot3.png"><br>
+<img src="TetraHearts-Screenshot4.png"><br>
+<img src="TetraHearts-Screenshot5.png"><br>
 
