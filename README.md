@@ -5,7 +5,7 @@ Uses Gameboy Assembly through <a href="https://rgbds.gbdev.io/">RGBDS</a>.  This
 
 At the beginning of every date, you pick a partner:
 - Michael, a care-free boy who loves to have fun
-- Stephanie, a controlling girl who makes your decisions
+- Stephanie, a controlling girl who makes decisions for you
 - George, a nervous boy who can open up once in a while
 - Jessica, a helpful girl who is inquisitive and caring
 
