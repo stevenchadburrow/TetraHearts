@@ -85,20 +85,25 @@ DEF char_bonus			EQU $D358 ; 4 bytes
 
 DEF jump_address		EQU $D35C ; 4 bytes
 
-DEF inc_wram_address	EQU $D360 ; 2 bytes
-DEF inc_vram_address	EQU $D362 ; 2 bytes
+DEF scene_status		EQU $D360
+DEF scene_direction		EQU $D361
+DEF scene_char_addr		EQU $D362 ; 2 bytes
+DEF scene_text_addr		EQU $D364 ; 2 bytes7
+DEF scene_ret_addr		EQU $D366 ; 2 bytes
+DEF scene_affection		EQU $D368
 
-DEF scene_status		EQU $D364
-DEF scene_direction		EQU $D365
-DEF scene_char_addr		EQU $D366 ; 2 bytes
-DEF scene_text_addr		EQU $D368 ; 2 bytes
-DEF scene_ret_addr		EQU $D36A ; 2 bytes
-DEF scene_affection		EQU $D36C
+DEF window_pos			EQU $D369
+DEF window_dir			EQU $D36A
 
-DEF window_pos			EQU $D36D
-DEF window_dir			EQU $D36E
+DEF inc_vram_start		EQU $D36B
+DEF inc_wram_address	EQU $D36C ; 2 bytes
+DEF inc_vram_address	EQU $D36E ; 2 bytes
 
-DEF inc_vram_start		EQU $D36F
+DEF audio_pos			EQU $D370
+DEF audio_timer			EQU $D371
+DEF audio_addr			EQU $D372 ; 2 bytes
+DEF audio_track			EQU $D374
+DEF audio_volume		EQU $D375
 
 
 ; WRAM from $C000-$CFFF and $D400-$DFFF
@@ -299,6 +304,21 @@ MainWaitLoop:
 	LD A, $00
 	LD [window_dir], A
 
+	; enable audio
+	LD A, $80
+	LD [$FF26], A
+	LD A, $77
+	LD [$FF24], A
+	LD A, $FF
+	LD [$FF25], A
+
+	; start music
+	LD A, $00
+	LD [audio_track], A
+	LD A, $00 ; no volume yet
+	LD [audio_volume], A
+	CALL AudioMusicLoad
+
 	; starting with reset flag on
 	LD A, $01
 	LD [reset_flag], A
@@ -353,7 +373,6 @@ VBlankWindowStop:
 	LD A, $00
 	LD [window_dir], A
 
-
 VBlankTransfer:
 	; check for incremental move wram-to-vram
 	LD A, [inc_vram_address+0]
@@ -397,7 +416,7 @@ VBlankTransferLoop:
 	LD [inc_wram_address+1], A
 	LD A, $D4
 	LD [inc_wram_address+0], A
-	RETI
+	JR VBlankAudio
 
 VBlankTransferAddress:
 	; set addresses
@@ -409,7 +428,7 @@ VBlankTransferAddress:
 	LD [inc_wram_address+1], A
 	LD A, H
 	LD [inc_wram_address+0], A
-	RETI
+	JR VBlankAudio
 
 VBlankTransferAlign:
 	; start at correct address
@@ -422,8 +441,7 @@ VBlankTransferAlign:
 	LD A, [inc_vram_start]
 	ADD A, $40
 	LD [inc_wram_address+0], A
-	RETI
-	
+	JR VBlankAudio
 
 VBlankScene:
 	; check which mode we are in
@@ -432,7 +450,7 @@ VBlankScene:
 	JR Z, VBlankMenu
 	
 	CALL SceneInterruptFunction
-	RETI
+	JR VBlankAudio
 
 VBlankMenu:
 	LD A, [menu_status]
@@ -440,11 +458,53 @@ VBlankMenu:
 	JR Z, VBlankGame
 
 	CALL MenuInterruptFunction
-	RETI
+	JR VBlankAudio
 
 VBlankGame:
 	CALL GameInterruptFunction
+	JR VBlankAudio
+	
+VBlankAudio:
+	; joypad capture function is assumed to already have been called here!
+
+	; check for select button
+	LD A, [joy_current]
+	BIT $02, A ; select
+	CALL Z, VBlankAudioCheckSelect
+
+	; check for start button
+	LD A, [joy_current]
+	BIT $03, A ; start
+	CALL Z, VBlankAudioCheckStart
+
+	; make sure to play the music each time
+	CALL AudioMusicPlay
+
 	RETI
+
+VBlankAudioCheckSelect:
+	LD A, [joy_previous]
+	BIT $02, A
+	JR NZ, VBlankAudioShiftSelect
+	RET
+
+VBlankAudioShiftSelect:
+	; select new track and reload from beginning
+	CALL AudioMusicTrack
+	CALL AudioMusicLoad
+	RET
+
+VBlankAudioCheckStart:
+	LD A, [joy_previous]
+	BIT $03, A
+	JR NZ, VBlankAudioShiftStart
+	RET
+
+VBlankAudioShiftStart:
+	; shift volume but do not reload
+	CALL AudioMusicVolume
+	RET
+	
 
 ; ****************
 ; ****************
@@ -513,6 +573,9 @@ GameEntry:
 	; set window to move up
 	LD A, $01
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $90
+	CALL Z, AudioEffectSlideUp
 
 	; clear background tiles
 	LD HL, $D800
@@ -1069,6 +1132,9 @@ GameWaitLoop:
 	; set window to move down
 	LD A, $02
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $00
+	CALL Z, AudioEffectSlideDown
 
 GameHaltLoop:
 	; check for jump address
@@ -1156,6 +1222,9 @@ GameInterruptCheck:
 	; set window to move up
 	LD A, $01
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $90
+	CALL Z, AudioEffectSlideUp
 
 	; go to scene just after game
 	LD A, $01 ; after game scene
@@ -1467,6 +1536,8 @@ FieldLinesClear:
 	CP field_array_byte-1
 	JR NZ, FieldLinesClear
 
+	CALL AudioEffectApprove
+
 	; check same line again
 	POP HL
 	LD BC, $000C
@@ -1716,6 +1787,9 @@ PieceMoveShiftAction:
 	SUB A, $01
 	AND A, $03
 	LD [piece_rot], A
+
+	CALL AudioEffectSwish
+
 	CALL RandomFunction ; randomize
 	RET
 
@@ -1731,6 +1805,9 @@ PieceMoveShiftBack:
 	ADD A, $01
 	AND A, $03
 	LD [piece_rot], A
+
+	CALL AudioEffectSwish
+
 	CALL RandomFunction ; randomize
 	RET
 
@@ -1927,6 +2004,8 @@ PiecePlaceCollision:
 	RET
 
 PiecePlaceSolid:
+	CALL AudioEffectCrunch
+
 	; increment pieces in classic mode
 	LD A, [score_mode]
 	CP A, $FF
@@ -2787,6 +2866,9 @@ MenuWaitLoop:
 	; set window to move down
 	LD A, $02
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $00
+	CALL Z, AudioEffectSlideDown
 
 MenuHaltLoop:
 	; check for jump address
@@ -2895,6 +2977,13 @@ MenuChoiceSelection:
 	LD A, $00
 	LD [reset_flag], A
 
+	; start music now
+	LD A, $00
+	LD [audio_track], A
+	LD A, $70 ; turn volume on now
+	LD [audio_volume], A
+	CALL AudioMusicLoad
+
 	; move cursor position to zero
 	LD A, $00
 	LD [menu_pos], A
@@ -2902,6 +2991,8 @@ MenuChoiceSelection:
 	JP MenuChoiceJump
 
 MenuChoiceStore:
+	CALL AudioEffectSelect
+
 	; check menu number
 	LD A, [menu_status]
 	CP A, $00
@@ -2943,6 +3034,9 @@ MenuChoiceGameStart:
 	; set window to move up
 	LD A, $01
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $90
+	CALL Z, AudioEffectSlideUp
 	
 	; load jump address
 	LD BC, SceneEntry
@@ -2980,6 +3074,9 @@ MenuChoiceMoveUp:
 	JR Z, MenuChoiceReturn
 	DEC A
 	LD [menu_pos], A
+
+	CALL AudioEffectBong
+
 	RET
 
 MenuChoiceMoveDown:
@@ -2989,6 +3086,9 @@ MenuChoiceMoveDown:
 	JR NC, MenuChoiceReturn
 	INC A
 	LD [menu_pos], A
+
+	CALL AudioEffectBong
+
 	RET
 
 MenuChoiceReturn:
@@ -3649,6 +3749,9 @@ SceneWaitLoop:
 	; set window to move down
 	LD A, $02
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $00
+	CALL Z, AudioEffectSlideDown
 
 SceneHaltLoop:
 	; check for jump address
@@ -3721,6 +3824,8 @@ SceneChoiceSelection:
 	INC A
 	LD [scene_status], A
 
+	CALL AudioEffectCollect
+
 	LD A, [scene_status]
 	CP A, $F0 ; exit scene
 	JR C, SceneChoiceExit
@@ -3763,6 +3868,9 @@ SceneChoiceMenu:
 	; set window to move up
 	LD A, $01
 	LD [window_dir], A
+	LD A, [window_pos]
+	CP A, $90
+	CALL Z, AudioEffectSlideUp
 	
 	; load jump address
 	LD BC, MenuEntry
@@ -3787,6 +3895,387 @@ SceneChoiceExit:
 	RET
 
 	
+; ****************
+; ****************
+; AUDIO SECTION
+; ****************
+; ****************
+
+; play effects through Channel 1
+AudioEffectBong:
+	LD A, $00
+	LD [$FF10], A
+	LD A, $80
+	LD [$FF11], A
+	LD A, $F1
+	LD [$FF12], A
+	LD A, $00
+	LD [$FF13], A
+	LD A, $85
+	LD [$FF14], A
+	RET
+
+AudioEffectSelect:
+	LD A, $24
+	LD [$FF10], A
+	LD A, $80
+	LD [$FF11], A
+	LD A, $F0
+	LD [$FF12], A
+	LD A, $00
+	LD [$FF13], A
+	LD A, $85
+	LD [$FF14], A
+	RET
+
+AudioEffectSlideUp:
+	LD A, $77
+	LD [$FF10], A
+	LD A, $80
+	LD [$FF11], A
+	LD A, $F2
+	LD [$FF12], A
+	LD A, $00
+	LD [$FF13], A
+	LD A, $86
+	LD [$FF14], A
+	RET
+
+AudioEffectSlideDown:
+	LD A, $7F
+	LD [$FF10], A
+	LD A, $80
+	LD [$FF11], A
+	LD A, $F2
+	LD [$FF12], A
+	LD A, $00
+	LD [$FF13], A
+	LD A, $86
+	LD [$FF14], A
+	RET
+	
+AudioEffectCrunch:
+	LD A, $1B
+	LD [$FF10], A
+	LD A, $28
+	LD [$FF11], A
+	LD A, $F5
+	LD [$FF12], A
+	LD A, $00
+	LD [$FF13], A
+	LD A, $C5
+	LD [$FF14], A
+	RET
+
+AudioEffectApprove:
+	LD A, $36
+	LD [$FF10], A
+	LD A, $80
+	LD [$FF11], A
+	LD A, $F2
+	LD [$FF12], A
+	LD A, $80
+	LD [$FF13], A
+	LD A, $86
+	LD [$FF14], A
+	RET
+
+AudioEffectSwish:
+	LD A, $24
+	LD [$FF10], A
+	LD A, $00
+	LD [$FF11], A
+	LD A, $F1
+	LD [$FF12], A
+	LD A, $00
+	LD [$FF13], A
+	LD A, $86
+	LD [$FF14], A
+	RET
+
+AudioEffectCollect:
+	LD A, $00
+	LD [$FF10], A
+	LD A, $80
+	LD [$FF11], A
+	LD A, $F2
+	LD [$FF12], A
+	LD A, $9D
+	LD [$FF13], A
+	LD A, $87
+	LD [$FF14], A
+	RET
+
+AudioMusicTrack:
+	; change music track
+	PUSH AF
+	LD A, [audio_track]
+	INC A
+	LD [audio_track], A
+	CP A, $03 ; max tracks
+	JR C, AudioMusicTrackExit
+	LD A, $00
+	LD [audio_track], A
+AudioMusicTrackExit:
+	POP AF
+	RET
+
+AudioMusicVolume:
+	; lower volume then cycle back
+	PUSH AF
+	LD A, [audio_volume]
+	CP A, $00
+	JR NZ, AudioMusicVolumeNext
+	LD A, $F0
+	LD [audio_volume], A
+	POP AF
+	RET
+AudioMusicVolumeNext:
+	SRL A
+	AND A, $F0
+	LD [audio_volume], A
+	POP AF
+	RET
+
+AudioMusicLoad:
+	; set initial music values
+	LD A, $00
+	LD [audio_pos], A
+	LD [audio_timer], A
+
+	; load square channel address
+	LD BC, AudioMusicLoadAutumn ; default
+	LD A, [audio_track]
+	CP A, $00
+	CALL Z, AudioMusicLoadAutumn
+	CP A, $01
+	CALL Z, AudioMusicLoadAdventure
+	CP A, $02
+	CALL Z, AudioMusicLoadClassic
+	
+	; put into address variables
+	LD A, B
+	LD [audio_addr+0], A
+	LD A, C
+	LD [audio_addr+1], A
+
+	RET
+
+AudioMusicLoadAutumn:
+	LD BC, AudioMusicDataAutumn
+	RET
+AudioMusicLoadAdventure:
+	LD BC, AudioMusicDataAdventure
+	RET
+AudioMusicLoadClassic:
+	LD BC, AudioMusicDataClassic
+	RET
+
+; play music using Channel 2, 3, and 4
+; call during v-blank
+AudioMusicPlay:
+	; increment timer, only once every 4 frames
+	LD A, [audio_timer]
+	INC A
+	LD [audio_timer], A
+	AND A, $03
+	CP A, $00
+	JR NZ, AudioMusicPlayExit
+
+	; increment position
+	LD A, [audio_pos]
+	INC A
+	LD [audio_pos], A
+
+	; find the exact location of the next note
+	LD B, $00
+	LD C, A
+	LD A, [audio_addr+0]
+	LD H, A
+	LD A, [audio_addr+1]
+	LD L, A
+	ADD HL, BC
+
+	; if $FF, then silence
+	LD A, [HL]
+	CP A, $FF
+	JR Z, AudioMusicPlayNoise
+
+	; fill channel 2 registers
+	LD A, $AC
+	LD [$FF16], A
+	LD A, [audio_volume]
+	LD [$FF17], A
+	LD A, [HL]
+	SLA A
+	SLA A
+	SLA A
+	SLA A
+	LD [$FF18], A
+	LD A, [HL]
+	SRL A
+	SRL A
+	SRL A
+	SRL A
+	OR A, $C0
+	LD [$FF19], A
+	
+AudioMusicPlayNoise:
+	; next page
+	INC H
+
+	; if $FF, then silence
+	LD A, [HL]
+	CP A, $FF
+	JR Z, AudioMusicPlayExit
+
+	; fill channel 4 registers
+	LD A, $2C
+	LD [$FF20], A
+	LD A, [audio_volume]
+	LD [$FF21], A
+	LD A, [HL]
+	LD [$FF22], A
+	LD A, $C0
+	LD [$FF23], A
+
+AudioMusicPlayExit:
+	; exit
+	RET
+
+AudioMusicDataAutumn:
+	; "Autumn Synth"
+	; Phrase 1: rolling arpeggios, D - Bm - G - Asus
+	DB $48,$48,$54,$54,$5B,$5B,$64,$64,$5B,$5B,$54,$54,$5B,$5B,$FF,$FF
+	DB $3E,$3E,$48,$48,$54,$54,$5F,$5F,$54,$54,$48,$48,$54,$54,$FF,$FF
+	DB $2C,$2C,$56,$56,$5F,$5F,$64,$64,$5F,$5F,$56,$56,$5F,$5F,$FF,$FF
+	DB $36,$36,$4E,$4E,$5B,$5B,$64,$64,$67,$67,$64,$64,$5B,$5B,$FF,$FF
+	; Phrase 2: the melody sings over a low bass note
+	DB $10,$10,$FF,$64,$64,$64,$64,$6A,$6A,$6A,$6A,$67,$67,$67,$67,$67
+	DB $3E,$3E,$FF,$6A,$6A,$6A,$6A,$64,$64,$64,$64,$5F,$5F,$5F,$5F,$5F
+	DB $2C,$2C,$FF,$64,$64,$64,$64,$6B,$6B,$6B,$6B,$64,$64,$64,$64,$64
+	DB $36,$36,$FF,$67,$67,$67,$67,$64,$64,$64,$64,$5B,$5B,$5B,$5B,$5B
+	; Phrase 3: the bridge, slow, long climbing arpeggios (G - D - Em - Asus)
+	DB $2C,$2C,$2C,$2C,$56,$56,$56,$56,$5F,$5F,$5F,$5F,$64,$64,$64,$64
+	DB $48,$48,$48,$48,$54,$54,$54,$54,$5B,$5B,$5B,$5B,$64,$64,$64,$64
+	DB $4E,$4E,$4E,$4E,$56,$56,$56,$56,$5F,$5F,$5F,$5F,$67,$67,$67,$67
+	DB $36,$36,$36,$36,$4E,$4E,$4E,$4E,$5B,$5B,$5B,$5B,$67,$67,$FF,$FF
+	; Phrase 4: the homecoming, falling melodies that settle back on D
+	DB $2C,$2C,$FF,$6B,$6B,$6B,$6B,$64,$64,$64,$64,$5F,$5F,$5F,$5F,$5F
+	DB $10,$10,$FF,$6A,$6A,$6A,$6A,$64,$64,$64,$64,$5B,$5B,$5B,$5B,$5B
+	DB $1D,$1D,$FF,$67,$67,$67,$67,$5F,$5F,$5F,$5F,$56,$56,$56,$56,$56
+	DB $10,$10,$10,$10,$48,$48,$48,$48,$5B,$5B,$5B,$5B,$64,$64,$FF,$FF
+
+	; Phrase 1 (bars 1-4), gentle pulse under the rolling arpeggios, tom fill at the end
+	DB $73,$85,$FF,$FF,$94,$FF,$94,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$94,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$94,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$94,$FF,$62,$74,$FF,$FF,$63,$73,$83,$FF
+	; Phrase 2 (bars 5-8), half-time, kick locks with the bass note, snare pickup at the end
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$73,$85,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$62,$74,$62,$74
+	; Phrase 3 (bars 9-12), the bridge, sparse and building, snare roll into the homecoming
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$94,$FF,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$94,$FF,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$94,$FF,$62,$74,$62,$74,$62,$74,$62,$FF
+	; Phrase 4 (bars 13-16), the homecoming, then a soft fade-out
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$73,$85,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$73,$85,$FF,$FF,$83,$94,$FF,$FF
+
+AudioMusicDataAdventure:
+	; "Deep Hollow" 
+	; Section A (bars 1-4), the lamp is lit in an empty hall
+	DB $48,$48,$48,$48,$48,$48,$48,$FF,$51,$51,$51,$51,$51,$51,$51,$51
+	DB $51,$51,$51,$51,$51,$51,$51,$FF,$48,$48,$48,$48,$48,$48,$48,$48
+	DB $3A,$3A,$3A,$3A,$3A,$3A,$3A,$FF,$41,$41,$41,$41,$48,$48,$48,$48
+	DB $4E,$4E,$4E,$4E,$4E,$4E,$4E,$FF,$36,$36,$36,$36,$36,$36,$FF,$FF
+	; Section A' (bars 5-8), the answer, settling down
+	DB $48,$48,$48,$48,$48,$48,$48,$FF,$51,$51,$51,$51,$5B,$5B,$5B,$5B
+	DB $5D,$5D,$5D,$5D,$5D,$5D,$5D,$FF,$51,$51,$51,$51,$51,$51,$51,$FF
+	DB $56,$56,$56,$56,$51,$51,$51,$51,$4E,$4E,$4E,$4E,$4E,$4E,$4E,$FF
+	DB $48,$48,$48,$48,$48,$48,$48,$48,$48,$48,$48,$48,$48,$48,$FF,$FF
+	; Bridge (bars 9-12), something stirs below, the lowest notes
+	DB $2C,$2C,$2C,$2C,$2C,$2C,$2C,$FF,$3A,$3A,$3A,$3A,$3A,$3A,$3A,$3A
+	DB $48,$48,$48,$48,$48,$48,$48,$FF,$36,$36,$36,$36,$36,$36,$36,$36
+	DB $3A,$3A,$3A,$3A,$3A,$3A,$3A,$FF,$41,$41,$41,$41,$3A,$3A,$3A,$3A
+	DB $36,$36,$36,$36,$36,$36,$36,$FF,$1D,$1D,$1D,$1D,$1D,$1D,$FF,$FF
+	; Reprise (bars 13-16), a little higher, then sinks to a long low D
+	DB $51,$51,$51,$51,$51,$51,$51,$FF,$5B,$5B,$5B,$5B,$64,$64,$64,$64
+	DB $64,$64,$64,$64,$64,$64,$64,$FF,$5D,$5D,$5D,$5D,$5D,$5D,$5D,$5D
+	DB $5D,$5D,$5D,$5D,$56,$56,$56,$56,$4E,$4E,$4E,$4E,$4E,$4E,$4E,$FF
+	DB $48,$48,$48,$48,$48,$48,$48,$FF,$10,$10,$10,$10,$10,$10,$10,$10
+
+	; Section A (bars 1-4), a single soft thump to start, then a pulse at mid-bar
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$A5,$FF,$FF,$FF,$FF,$FF,$FF
+	; Section A' (bars 5-8), the same pulse, settling home
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$A5,$FF,$FF,$FF,$FF,$FF,$FF
+	; Bridge (bars 9-12), slow falling swells, the lowest rumble
+	DB $83,$94,$A5,$FF,$FF,$FF,$FF,$FF,$94,$A5,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $83,$94,$A5,$FF,$FF,$FF,$FF,$FF,$94,$A5,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $83,$94,$A5,$FF,$FF,$FF,$FF,$FF,$94,$A5,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $83,$94,$A5,$FF,$FF,$FF,$FF,$FF,$83,$94,$A5,$FF,$FF,$FF,$FF,$FF
+	; Reprise (bars 13-16), the thump returns, then a long fade under the final low D
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$94,$FF,$FF,$FF,$FF,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$FF,$FF,$FF,$FF,$83,$94,$A5,$FF,$FF,$FF,$FF,$FF
+
+AudioMusicDataClassic:
+	; "Tetra Classic"
+	; Section A (bars 1-4)
+	DB $67,$67,$67,$67,$5F,$5F,$61,$61,$64,$64,$64,$64,$61,$61,$5F,$5F
+	DB $5B,$5B,$5B,$FF,$5B,$5B,$61,$61,$67,$67,$67,$67,$64,$64,$61,$61
+	DB $5F,$5F,$5F,$5F,$5F,$5F,$61,$61,$64,$64,$64,$64,$67,$67,$67,$67
+	DB $61,$61,$61,$61,$5B,$5B,$5B,$FF,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B
+	; Section B (bars 5-8)
+	DB $64,$64,$64,$64,$64,$64,$69,$69,$6D,$6D,$6D,$6D,$6B,$6B,$69,$69
+	DB $67,$67,$67,$67,$67,$67,$61,$61,$67,$67,$67,$67,$64,$64,$61,$61
+	DB $5F,$5F,$5F,$FF,$5F,$5F,$61,$61,$64,$64,$64,$64,$67,$67,$67,$67
+	DB $61,$61,$61,$61,$5B,$5B,$5B,$FF,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B
+	; Bridge (bars 9-12), slow half notes
+	DB $67,$67,$67,$67,$67,$67,$67,$67,$61,$61,$61,$61,$61,$61,$61,$61
+	DB $64,$64,$64,$64,$64,$64,$64,$64,$5F,$5F,$5F,$5F,$5F,$5F,$5F,$5F
+	DB $61,$61,$61,$61,$61,$61,$61,$61,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B
+	DB $59,$59,$59,$59,$59,$59,$59,$59,$59,$59,$59,$59,$59,$59,$FF,$FF
+	; Reprise (bars 13-16), ends on a long A
+	DB $67,$67,$67,$67,$5F,$5F,$61,$61,$64,$64,$64,$64,$61,$61,$5F,$5F
+	DB $5B,$5B,$5B,$FF,$5B,$5B,$61,$61,$67,$67,$67,$67,$64,$64,$61,$61
+	DB $5F,$5F,$5F,$5F,$5F,$5F,$61,$61,$64,$64,$64,$64,$67,$67,$67,$67
+	DB $61,$61,$61,$61,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B,$5B
+
+	; Section A (bars 1-4), kick on 1&3, snare on 2&4, low ticks on the offbeats
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$62,$74
+	; Section B (bars 5-8), double kick on the "and" of 3, tom fill into the bridge
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$73,$85,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$73,$85,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$63,$73,$73,$83
+	; Bridge (bars 9-12), half-time: kick on 1, snare on 3, low ticks on 2&4
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$62,$74,$FF,$FF,$94,$FF,$FF,$FF
+	DB $73,$85,$FF,$FF,$94,$FF,$94,$FF,$62,$74,$62,$74,$62,$74,$62,$FF
+	; Reprise (bars 13-16), full groove returns, then a soft ending
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$73,$85,$62,$74,$94,$FF
+	DB $73,$85,$94,$FF,$62,$74,$94,$FF,$73,$85,$94,$FF,$62,$74,$62,$74
+	DB $73,$85,$FF,$FF,$94,$FF,$FF,$FF,$73,$85,$FF,$FF,$83,$94,$FF,$FF
+
+
 
 
 ; ****************
@@ -4144,448 +4633,448 @@ CharacterNameText:
 ; ********
 
 SceneDialogBoy1Affection:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OH HEY, YOU CAME!   "
+	DB "COOL. SO WHAT'S THE "
+	DB "PLAN TODAY? I'M     "
+	DB "PRETTY CHILL.      ", $00
 
-	DB "MEDIUM AFFECTION    "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "HEY, THERE YOU ARE! "
+	DB "I WAS JUST THINKING "
+	DB "ABOUT YOU. WEIRD?   "
+	DB "NAH. LET'S HANG OUT", $40
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "THERE'S MY FAVORITE "
+	DB "PERSON.  SORRY, THAT"
+	DB "JUST SLIPPED OUT.   "
+	DB "... NOT SORRY.     ", $80
 
 SceneDialogBoy1Location:
-	DB "CAFE                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "OH NICE, THE CAFE!  "
+	DB "I COULD GO FOR A    "
+	DB "SNACK. OR THREE.    "
+	DB "GOOD PICK.         ", $40
 
-	DB "LIBRARY             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "THE LIBRARY? HUH.   "
+	DB "IT'S SO QUIET IN    "
+	DB "HERE. IS IT OKAY TO "
+	DB "EVEN WHISPER?      ", $00
 
-	DB "PARK                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "THE PARK! YES! OKAY,"
+	DB "THIS IS MY PLACE.   "
+	DB "FRESH AIR, SUN, AND "
+	DB "ZERO HOMEWORK.     ", $80
 
-	DB "ARCADE              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "ARCADE! HECK YEAH!  "
+	DB "NO PRESSURE HERE,   "
+	DB "JUST US AND SOME    "
+	DB "GOOD OLD GAMES.    ", $40
 
 SceneDialogBoy1Challenge:
-	DB "PIECES              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "ALL IN? SURE, WHY   "
+	DB "NOT! OVERTHINKING IS"
+	DB "HOW YOU MISS OUT.   "
+	DB "LET'S ROLL THE DICE", $40
 
-	DB "LINES               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "STAYING TRUE, HUH?  "
+	DB "EASY. I ONLY KNOW   "
+	DB "HOW TO BE ME, SO    "
+	DB "LET'S KEEP IT REAL.", $00
 
-	DB "TRASH               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "LETTING GO? THAT'S  "
+	DB "KINDA MY SPECIALTY. "
+	DB "STUFF PILES UP, YOU "
+	DB "JUST NEED TO BREATH", $80
 
-	DB "ROWS                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OPENING UP? OKAY.   "
+	DB "I'LL GO FIRST: I'M  "
+	DB "BAD AT THIS PART.   "
+	DB "BUT I'LL TRY.      ", $00
 
 SceneDialogBoy1Classic:
-	DB "CLASSIC             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "DEEP BREATH. LOOSEN "
+	DB "UP. YOU'VE GOT THIS!"
+	DB "AND IF IT ALL FALLS "
+	DB "APART, IT WAS FUN. ", $40
 
 SceneDialogBoy1EndClassic:
-	DB "CLASSIC END         "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "HA! THAT WAS A RIDE."
+	DB "WIN, LOSE, WHATEVER,"
+	DB "I HAD A BLAST. LET'S"
+	DB "DO IT AGAIN!       ", $40
 
 SceneDialogBoy1EndBad:
-	DB "BAD END             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "AW, MAN. I REALLY   "
+	DB "THOUGHT WE HAD THAT "
+	DB "ONE. BUMMER. I KNOW "
+	DB "YOU'VE GOT MORE.   ", $00
 
 SceneDialogBoy1EndGood:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "HEY, NICE WORK! YOU "
+	DB "TOTALLY PULLED THAT "
+	DB "OFF. I'M IMPRESSED. "
+	DB "SERIOUSLY!         ", $40
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "OKAY, I'M GONNA SAY "
+	DB "IT: YOU'RE AWESOME. "
+	DB "YOU MAKE EVERYTHING "
+	DB "MORE FUN, FOR REAL.", $00
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "OK, NO JOKE, THIS   "
+	DB "TIME. YOU'RE THE    "
+	DB "BEST PART OF MY DAY."
+	DB "EVERY. SINGLE. DAY.", $00
 
 SceneDialogBoy1EndSecond:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "TODAY WAS A GOOD DAY"
+	DB "HANGING WITH YOU IS "
+	DB "EASY. IN A GOOD WAY."
+	DB "LET'S DO IT AGAIN. ", $00
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "I USUALLY DON'T GET "
+	DB "EXCITED ABOUT PLANS."
+	DB "BUT WITH YOU, I'M   "
+	DB "ALWAYS EXCITED.    ", $80
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "I THINK I'M FALLING "
+	DB "FOR YOU. OKAY, I'M  "
+	DB "IN LOVE WITH YOU.   "
+	DB "IS THAT OK? ...    ", $80
 
 ; ********
 ; Girl 1 Data
 ; ********
 
 SceneDialogGirl1Affection:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "PERFECT, YOU CAME.  "
+	DB "I ALWAYS GET WHAT I "
+	DB "WANT. LET'S SEE IF  "
+	DB "YOU'RE WORTH IT.   ", $00
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "RIGHT ON TIME. GOOD."
+	DB "MY FRIENDS ASK ABOUT"
+	DB "YOU. I'VE MADE QUITE"
+	DB "THE CHOICE! :)     ", $40
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "I WANT YOUR COMPANY "
+	DB "MORE THAN ANYTHING. "
+	DB "STAY CLOSE TO ME, I "
+	DB "INSIST...          ", $80
 
 SceneDialogGirl1Location:
-	DB "CAFE                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "MY FAVORITE CAFE!   "
+	DB "THEY KNOW MY ORDER. "
+	DB "GET WHATEVER YOU    "
+	DB "LIKE, I'M BUYING.  ", $80
 
-	DB "LIBRARY             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "THE LIBRARY. REALLY?"
+	DB "NOBODY HERE TO SEE  "
+	DB "US. FINE. BE BRIEF. "
+	DB "I DON'T WHISPER.   ", $00
 
-	DB "PARK                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "THE PARK? NOT BAD.  "
+	DB "SUN SUITS ME, AND   "
+	DB "A STROLL SUITS YOU! "
+	DB "WALK WITH ME.      ", $40
 
-	DB "ARCADE              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "THE ARCADE! NOW WE  "
+	DB "PLAY. I NEVER LOSE, "
+	DB "SO DON'T TAKE IT    "
+	DB "PERSONALLY. <3     ", $40
 
 SceneDialogGirl1Challenge:
-	DB "PIECES              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "ALL IN? BOLD MOVE.  "
+	DB "I DON'T GAMBLE. I   "
+	DB "ONLY BACK WINNERS.  "
+	DB "DON'T DISAPPOINT.  ", $40
 
-	DB "LINES               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "STAYING TRUE? YES.  "
+	DB "I EXPECT LOYALTY,   "
+	DB "AND I REWARD IT.    "
+	DB "GENEROUSLY...  ;D  ", $80
 
-	DB "TRASH               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "LET GO? OF WHAT? OH,"
+	DB "THE CLUTTER. OUT IT "
+	DB "GOES. I KEEP ONLY   "
+	DB "WHAT I WANT.       ", $00
 
-	DB "ROWS                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OPENING UP? HM. I   "
+	DB "DON'T, AS A RULE.   "
+	DB "CONSIDER THIS A     "
+	DB "PRIVILEGE.         ", $00
 
 SceneDialogGirl1Classic:
-	DB "CLASSIC             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "CHIN UP! I PICKED   "
+	DB "YOU, SO NO PRESSURE."
+	DB "WELL, A LITTLE BIT. "
+	DB "SHOW ME SOMETHING! ", $40
 
 SceneDialogGirl1EndClassic:
-	DB "CLASSIC END         "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "WELL PLAYED, REALLY."
+	DB "YOU'RE A QUICK STUDY"
+	DB "AND I'M AN EXCELLENT"
+	DB "COACH. AGAIN SOON. ", $40
 
 SceneDialogGirl1EndBad:
-	DB "BAD END             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "HM. THAT WASN'T IT. "
+	DB "I'M DISAPPOINTED.   "
+	DB "I CHOSE YOU TO WIN. "
+	DB "DO BETTER. >(      ", $00
 
 SceneDialogGirl1EndGood:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "WELL, WELL. NOT BAD."
+	DB "I DID WONDER IF YOU "
+	DB "YOU WERE WORTH IT.  "
+	DB "... YOU ARE. =)    ", $40
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "EVERYONE SAW THAT.  "
+	DB "THEY'RE ALL JEALOUS."
+	DB "OF ME, NATURALLY.   "
+	DB "AND YOU. A LITTLE. ", $00
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "I'LL SAY THIS ONCE. "
+	DB "I DIDN'T EXPECT TO  "
+	DB "FALL FOR MY OWN PICK"
+	DB "BUT HERE WE ARE.   ", $80
 
 SceneDialogGirl1EndSecond:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "DON'T GET COCKY.    "
+	DB "BUT I'LL ALLOW A    "
+	DB "LITTLE PRIDE. COME  "
+	DB "BACK, I'M NOT DONE.", $00
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "I DON'T COMPLIMENT  "
+	DB "LIGHTLY, SO LISTEN: "
+	DB "I CHOSE WELL. DON'T "
+	DB "FORGET THIS. :>    ", $80
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "I LOVE YOU. THERE.  "
+	DB "DON'T LOOK SO SMUG. "
+	DB "I ALWAYS GET WHAT I "
+	DB "WANT. STAY WITH ME.", $80
 
 ; ********
 ; Boy 2 Data
 ; ********
 
 SceneDialogBoy2Affection:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OH! H-HI. YOU CAME. "
+	DB "I, UM... WASN'T SURE"
+	DB "YOU'D ACTUALLY SHOW."
+	DB "SO... SHALL WE?    ", $00
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "HEY! YOU'RE HERE. I "
+	DB "SAVED US A SPOT. I  "
+	DB "WAS KINDA HOPING YOU"
+	DB "WOULD PICK TODAY.  ", $40
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "HI, YOU. I WAS JUST "
+	DB "THINKING ABOUT YOU. "
+	DB "HA, SORRY! TOO MUCH?"
+	DB "...I'M GLAD ITS YOU", $80
 
 SceneDialogBoy2Location:
-	DB "CAFE                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "THE CAFE? OH. OKAY. "
+	DB "IT'S KINDA LOUD, AND"
+	DB "I ALWAYS MESS UP... "
+	DB "BUT, I'LL TRY!     ", $00
 
-	DB "LIBRARY             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "THE LIBRARY! YES!   "
+	DB "I LOVE THE QUIET AND"
+	DB "THE SMELL OF BOOKS. "
+	DB "IS THAT WEIRD?     ", $80
 
-	DB "PARK                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "OOH, THE PARK! NICE."
+	DB "FRESH AIR COULD HELP"
+	DB "ME RELAX. A LITTLE. "
+	DB "LEAD THE WAY!      ", $40
 
-	DB "ARCADE              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "THE ARCADE! AWESOME!"
+	DB "NO PRESSURE, JUST   "
+	DB "FUN. I'M ACTUALLY   "
+	DB "GOOD AT THIS!      ", $40
 
 SceneDialogBoy2Challenge:
-	DB "PIECES              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "ALL IN? WHOA. OKAY. "
+	DB "I USUALLY OVERTHINK "
+	DB "EVERYTHING FIRST... "
+	DB "HERE GOES NOTHING! ", $40
 
-	DB "LINES               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "STAYING TRUE, HUH?  "
+	DB "I'M NOT GREAT AT BIG"
+	DB "SPEECHES, BUT I MEAN"
+	DB "WHAT I SAY. ALWAYS.", $80
 
-	DB "TRASH               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "LETTING GO... HM. I "
+	DB "HOLD ONTO STUFF. OLD"
+	DB "WORRIES, MOSTLY.    "
+	DB "LET'S CLEAR IT OUT.", $00
 
-	DB "ROWS                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OPENING UP? ME?     "
+	DB "*GULP* I'M A BIT... "
+	DB "GUARDED. BUT WITH   "
+	DB "YOU, I'LL TRY.     ", $00
 
 SceneDialogBoy2Classic:
-	DB "CLASSIC             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "OKAY, DEEP BREATH.  "
+	DB "FUN FACT: I ALWAYS  "
+	DB "SAY SORRY TO THINGS "
+	DB "I MISS. LET'S GO!  ", $40
 
 SceneDialogBoy2EndClassic:
-	DB "CLASSIC END         "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "HA! THAT WAS GREAT. "
+	DB "YOU MADE IT LOOK    "
+	DB "EASY. I'D HAVE LOST "
+	DB "MY NERVE. NICE WORK", $40
 
 SceneDialogBoy2EndBad:
-	DB "BAD END             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OH... THAT DIDN'T GO"
+	DB "HOW I HOPED. I'M A  "
+	DB "LITTLE BUMMED, BUT  "
+	DB "LET'S TRY AGAIN?   ", $00
 
 SceneDialogBoy2EndGood:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "YOU DID IT! WOW. I  "
+	DB "WAS SO NERVOUS...   "
+	DB "BUT THIS WAS GREAT. "
+	DB "THANK YOU FOR TODAY", $40
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "THAT WAS PERFECT.   "
+	DB "I'D FORGOTTEN TO BE "
+	DB "NERVOUS. YOU DO THAT"
+	DB "TO ME, YOU KNOW?   ", $00
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "OKAY. NO STAMMERING."
+	DB "JUST THE TRUTH. I   "
+	DB "THINK OF YOU ALL DAY"
+	DB "EVERY DAY.         ", $00
 
 SceneDialogBoy2EndSecond:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "CAN I BE HONEST? I  "
+	DB "DIDN'T THINK I'D    "
+	DB "HAVE THIS MUCH FUN. "
+	DB "LET'S DO THIS AGAIN", $80
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "I DON'T WANT TODAY  "
+	DB "TO BE OVER YET. YOU "
+	DB "MAKE BE BRAVER, AND "
+	DB "I LIKE THAT.       ", $80
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "I'M IN LOVE WITH YOU"
+	DB "THERE. I SAID IT. MY"
+	DB "HEART IS RACING. AND"
+	DB "I'M NOT SORRY.     ", $80
 
 ; ********
 ; Girl 2 Data
 ; ********
 
 SceneDialogGirl2Affection:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "HI! I WAS CURIOUS   "
+	DB "ABOUT YOU. WHAT DO  "
+	DB "YOU LIKE TO DO WHEN "
+	DB "YOU HAVE FREE TIME?", $00
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "I'VE BEEN WONDERING "
+	DB "HOW YOU'VE BEEN     "
+	DB "SINCE WE LAST TALKED"
+	DB "... LOOKING GOOD!  ", $40
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "WHAT'S ON YOUR MIND "
+	DB "TODAY? I'D LOVE TO  "
+	DB "HEAR ALL OF IT, EVEN"
+	DB "THE SMALL THINGS.  ", $80
 
 SceneDialogGirl2Location:
-	DB "CAFE                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "IT'S A LITTLE LOUD, "
+	DB "IN THE CAFE, OH WELL"
+	DB "WHAT ARE YOU IN THE "
+	DB "MOOD FOR TODAY?    ", $00
 
-	DB "LIBRARY             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "NICE, THE LIBRARY.  "
+	DB "WHAT STORIES DO YOU "
+	DB "USUALLY GET LOST IN?"
+	DB "I'D LOVE TO KNOW.  ", $40
 
-	DB "PARK                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "THE PARK! GOOD PICK."
+	DB "GOT A FAVORITE SPOT?"
+	DB "SHOW ME. I'D LOVE TO"
+	DB "IT WITH YOU.       ", $80
 
-	DB "ARCADE              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "OOH, THE ARCADE!    "
+	DB "WHICH GAME IS YOUR  "
+	DB "FAVORITE? BRING ME. "
+	DB "I'LL CHEER YOU ON! ", $40
 
 SceneDialogGirl2Challenge:
-	DB "PIECES              "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "ALL IN? THAT TAKES  "
+	DB "TRUST. I FEEL THAT I"
+	DB "CAN TRUST YOU. TELL "
+	DB "ME MORE...         ", $80
 
-	DB "LINES               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "STAYING TRUE? PEOPLE"
+	DB "CAN ALWAYS FEEL WHEN"
+	DB "IT'S REAL! WHAT DOES"
+	DB "IT MEAN TO YOU?    ", $40
 
-	DB "TRASH               "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "LETTING GO IS HARD. "
+	DB "WE CARRY THINGS SO  "
+	DB "LONG THEY FEL LIKE  "
+	DB "PART OF US. READY? ", $00
 
-	DB "ROWS                "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OPENING UP TAKES    "
+	DB "COURAGE. WHERE'D YOU"
+	DB "WANT TO BEGIN? TAKE "
+	DB "YOUR TIME, I'M HERE", $00
 
 SceneDialogGirl2Classic:
-	DB "CLASSIC             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "READY WHEN YOU ARE. "
+	DB "I'VE GOT A GOOD     "
+	DB "FEELING ABOUT YOU.  "
+	DB "GO HAVE FUN!       ", $40
 
 SceneDialogGirl2EndClassic:
-	DB "CLASSIC END         "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "WELL, THAT WAS A    "
+	DB "GOOD ONE. I'D BUY A "
+	DB "TICKET TO SEE THAT  "
+	DB "AGAIN. ROUND TWO?  ", $40
 
 SceneDialogGirl2EndBad:
-	DB "BAD END             "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "OH... THAT GOT AWAY "
+	DB "FROM YOU. I'D HOPED "
+	DB "WE'D GET FURTHER.   "
+	DB "TRY AGAIN? YOU CAN.", $00
 
 SceneDialogGirl2EndGood:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "YOU DID IT! I KNEW  "
+	DB "YOU COULD. THAT WAS "
+	DB "REALLY SOMETHING I  "
+	DB "ENJOYED WITH YOU.  ", $40
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "THAT WAS WONDERFUL. "
+	DB "YOU DON'T GIVE UP,  "
+	DB "DO YOU? I REALLY    "
+	DB "ADMIRE THAT IN YOU.", $00
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "TODAY WENT BY SO    "
+	DB "FAST. I DIDN'T WANT "
+	DB "TO END. YOU MAKE    "
+	DB "EVERY MOMENT BETTER", $80
 
 SceneDialogGirl2EndSecond:
-	DB "LOW AFFECTION       "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $00
+	DB "TODAY WAS LOVELY. I "
+	DB "WOULD LIKE TO KNOW  "
+	DB "YOU BETTER. COME    "
+	DB "AGAIN SOON, MAYBE? ", $80
 
-	DB "MEDIUM AFFECTIION   "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $40
+	DB "EVERY TIME, I FIND  "
+	DB "SOMETHING NEW I LIKE"
+	DB "ABOUT YOU. WHAT WILL"
+	DB "IT BE NEXT TIME?   ", $80
 
-	DB "HIGH AFFECTION      "
-	DB "                    "
-	DB "                    "
-	DB "                   ", $80
+	DB "I THINK I'M IN LOVE "
+	DB "WITH YOU. ACTUALLY, "
+	DB "I'M SURE OF IT. IS  "
+	DB "THAT OKAY WITH YOU?", $80
 
 ; ********
 ; Author Data
@@ -5504,7 +5993,7 @@ TitleData:
 	DB $05,$06,$05,$06,$05,$06,$05,$06,$05,$06,$05,$06,$05,$06,$07,$07,
 	DB $1D,$1E,$15,$16,$15,$16,$15,$16,$15,$16,$15,$16,$15,$16,$F7,$F7,
 	DB $14,$18,$14,$18,$14,$18,$14,$18,$14,$18,$14,$18,$1A,$1C,$FF,$FF,
-	DB $02,$03,$02,$03,$FE,$FF,$FE,$FF,$02,$03,$03,$03,$05,$05,$FC,$FC,
+	DB $02,$03,$02,$03,$FE,$FF,$FE,$FF,$02,$03,$03,$03,$07,$07,$FC,$FC,
 	DB $80,$00,$9D,$1E,$9D,$1E,$80,$00,$80,$00,$42,$83,$A6,$C7,$FF,$FF,
 	DB $29,$31,$29,$31,$29,$31,$29,$31,$29,$31,$29,$31,$29,$31,$FF,$FF,
 	DB $01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$01,$00,$00,$00,$00,
